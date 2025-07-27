@@ -16,6 +16,7 @@ from libopenschichtplaner5.registry import TABLE_NAMES
 from libopenschichtplaner5.reports import ReportGenerator
 from libopenschichtplaner5.export import DataExporter, ReportExporter, ExportFormat
 from libopenschichtplaner5.utils.validation import DataValidator
+from libopenschichtplaner5.exceptions import DataNotFoundError
 
 
 class CLIFormatter:
@@ -56,7 +57,7 @@ class CLIFormatter:
         
         # Determine fields to display
         if not fields:
-            fields = [k for k in records[0].keys() if not k.endswith('_related')]
+            fields = [k for k in records[0].keys() if not k.endswith('_related') and not k.startswith('_')]
         
         # Calculate column widths
         widths = {}
@@ -99,6 +100,12 @@ class EnhancedCLI:
             required=True, 
             type=Path,
             help="Directory containing DBF files"
+        )
+        
+        parser.add_argument(
+            "--verbose", "-v",
+            action="store_true",
+            help="Enable verbose output"
         )
         
         subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -147,6 +154,11 @@ class EnhancedCLI:
         query_parser.add_argument("--format", choices=["table", "json", "csv"], 
                                 default="table", help="Output format")
         
+        # Table info
+        info_parser = subparsers.add_parser("info", help="Show table information")
+        info_parser.add_argument("table", choices=TABLE_NAMES, help="Table to inspect")
+        info_parser.add_argument("--sample", type=int, default=5, help="Number of sample records to show")
+        
         # Relationships info
         rel_parser = subparsers.add_parser("relationships", help="Show table relationships")
         rel_parser.add_argument("--table", help="Show relationships for specific table")
@@ -188,6 +200,17 @@ class EnhancedCLI:
         overtime_report.add_argument("--format", choices=["json", "html", "markdown"], 
                                    default="json", help="Output format")
         
+        # Export command
+        export_parser = subparsers.add_parser("export", help="Export table data")
+        export_parser.add_argument("table", choices=TABLE_NAMES, help="Table to export")
+        export_parser.add_argument("--where", nargs=3, action="append",
+                                 metavar=("FIELD", "OP", "VALUE"),
+                                 help="Filter condition")
+        export_parser.add_argument("--format", choices=["csv", "json", "excel", "html", "markdown"],
+                                 default="csv", help="Export format")
+        export_parser.add_argument("--output", type=Path, required=True, help="Output file")
+        export_parser.add_argument("--limit", type=int, help="Limit records")
+        
         # Validate command
         validate_parser = subparsers.add_parser("validate", help="Validate data integrity")
         validate_parser.add_argument("--fix", action="store_true", help="Attempt to fix issues")
@@ -215,6 +238,13 @@ Examples:
   python -m openschichtplaner5_cli --dir /path/to/dbf query 5EMPL \\
     --where position = "Developer" --join 5NOTE --join 5GRASG --limit 10
   
+  # Show table info
+  python -m openschichtplaner5_cli --dir /path/to/dbf info 5EMPL --sample 10
+  
+  # Export data
+  python -m openschichtplaner5_cli --dir /path/to/dbf export 5EMPL \\
+    --format excel --output employees.xlsx --limit 100
+  
   # Show relationships
   python -m openschichtplaner5_cli --dir /path/to/dbf relationships --table 5EMPL
 """
@@ -229,7 +259,7 @@ Examples:
         
         # Initialize query engine and other components
         try:
-            self.engine = QueryEngine(parsed_args.dir)
+            self.engine = QueryEngine(parsed_args.dir, verbose=parsed_args.verbose)
             self.report_generator = ReportGenerator(self.engine)
             self.data_exporter = DataExporter()
             self.report_exporter = ReportExporter()
@@ -239,31 +269,42 @@ Examples:
             return 1
         
         # Dispatch to appropriate handler
-        if parsed_args.command == "employee":
-            self._handle_employee_command(parsed_args)
-        elif parsed_args.command == "group":
-            self._handle_group_command(parsed_args)
-        elif parsed_args.command == "query":
-            self._handle_query_command(parsed_args)
-        elif parsed_args.command == "relationships":
-            self._handle_relationships_command(parsed_args)
-        elif parsed_args.command == "info":
-            self._handle_info_command(parsed_args)
-        elif parsed_args.command == "report":
-            self._handle_report_command(parsed_args)
-        elif parsed_args.command == "validate":
-            self._handle_validate_command(parsed_args)
-        elif parsed_args.command == "export":
-            self._handle_export_command(parsed_args)
-        else:
-            self.parser.print_help()
+        try:
+            if parsed_args.command == "employee":
+                self._handle_employee_command(parsed_args)
+            elif parsed_args.command == "group":
+                self._handle_group_command(parsed_args)
+            elif parsed_args.command == "query":
+                self._handle_query_command(parsed_args)
+            elif parsed_args.command == "relationships":
+                self._handle_relationships_command(parsed_args)
+            elif parsed_args.command == "info":
+                self._handle_info_command(parsed_args)
+            elif parsed_args.command == "report":
+                self._handle_report_command(parsed_args)
+            elif parsed_args.command == "validate":
+                self._handle_validate_command(parsed_args)
+            elif parsed_args.command == "export":
+                self._handle_export_command(parsed_args)
+            else:
+                self.parser.print_help()
+        except DataNotFoundError as e:
+            print(f"Error: {e}")
+            return 1
+        except Exception as e:
+            if parsed_args.verbose:
+                import traceback
+                traceback.print_exc()
+            else:
+                print(f"Error: {e}")
+            return 1
     
     def _handle_employee_command(self, args):
         """Handle employee-related commands."""
         if args.subcommand == "profile":
-            if args.full:
-                profile = self.engine.get_employee_full_profile(args.id)
-                if profile:
+            try:
+                if args.full:
+                    profile = self.engine.get_employee_full_profile(args.id)
                     print(CLIFormatter.format_employee(profile))
                     
                     # Show related data
@@ -276,16 +317,16 @@ Examples:
                             else:
                                 print(f"  {data}")
                 else:
-                    print(f"Employee with ID {args.id} not found.")
-            else:
-                result = (self.engine.query()
-                         .select("5EMPL")
-                         .where("id", "=", args.id)
-                         .execute())
-                if result.records:
-                    print(CLIFormatter.format_employee(result.to_dict()[0]))
-                else:
-                    print(f"Employee with ID {args.id} not found.")
+                    result = (self.engine.query()
+                             .select("5EMPL")
+                             .where("id", "=", args.id)
+                             .execute())
+                    if result.records:
+                        print(CLIFormatter.format_employee(result.to_dict()[0]))
+                    else:
+                        print(f"Employee with ID {args.id} not found.")
+            except DataNotFoundError as e:
+                print(f"Error: {e}")
         
         elif args.subcommand == "search":
             results = self.engine.search_employees(args.term)
@@ -338,10 +379,16 @@ Examples:
                 try:
                     if value.isdigit():
                         value = int(value)
-                    elif value.replace(".", "").isdigit():
+                    elif value.replace(".", "").replace("-", "").isdigit():
                         value = float(value)
                     elif value.lower() in ["true", "false"]:
                         value = value.lower() == "true"
+                    # Try to parse as date
+                    elif "-" in value and len(value) == 10:
+                        try:
+                            value = datetime.strptime(value, "%Y-%m-%d").date()
+                        except:
+                            pass  # Keep as string
                 except:
                     pass  # Keep as string
                 
@@ -442,7 +489,16 @@ Examples:
             # Show sample records
             if args.sample > 0:
                 print(f"\nSample records (first {args.sample}):")
-                sample_data = [self._record_to_dict(r) for r in records[:args.sample]]
+                sample_data = []
+                for r in records[:args.sample]:
+                    record_dict = {}
+                    for attr in dir(r):
+                        if not attr.startswith("_") and not callable(getattr(r, attr)):
+                            value = getattr(r, attr)
+                            if isinstance(value, (date, datetime)):
+                                value = value.isoformat()
+                            record_dict[attr] = value
+                    sample_data.append(record_dict)
                 print(CLIFormatter.format_table(sample_data))
     
     def _handle_report_command(self, args):
@@ -560,7 +616,7 @@ Examples:
                 try:
                     if value.isdigit():
                         value = int(value)
-                    elif value.replace(".", "").isdigit():
+                    elif value.replace(".", "").replace("-", "").isdigit():
                         value = float(value)
                 except:
                     pass  # Keep as string
@@ -585,14 +641,6 @@ Examples:
             print(f"Successfully exported {len(data)} records to: {args.output}")
         except Exception as e:
             print(f"Error exporting data: {e}")
-    
-    def _record_to_dict(self, record: Any) -> Dict[str, Any]:
-        """Convert a record to dictionary."""
-        result = {}
-        for attr in dir(record):
-            if not attr.startswith("_") and not callable(getattr(record, attr)):
-                result[attr] = getattr(record, attr)
-        return result
 
 
 def main():
