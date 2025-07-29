@@ -545,6 +545,8 @@ class EnhancedCLIv2:
 
         emp_profile = emp_sub.add_parser("profile")
         emp_profile.add_argument("--id", type=int, required=True)
+        emp_profile.add_argument("--full", action="store_true",
+                                help="Show full profile with all related data")
 
         emp_search = emp_sub.add_parser("search")
         emp_search.add_argument("term")
